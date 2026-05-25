@@ -1,0 +1,29 @@
+{
+  "name": "mycelia",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup:master": "tsx scripts/setup-master.ts",
+    "move:publish": "tsx scripts/publish-move.ts",
+    "dev": "pnpm --filter @mycelia/server dev & pnpm --filter @mycelia/web dev",
+    "dev:server": "pnpm --filter @mycelia/server dev",
+    "dev:web": "pnpm --filter @mycelia/web dev",
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:unit": "vitest run packages/core",
+    "test:integration": "vitest run test/integration",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "dotenv": "^16.4.7"
+  }
+}

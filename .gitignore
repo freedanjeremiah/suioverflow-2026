@@ -1,0 +1,42 @@
+# secrets & local config
+.env
+.env.*
+!.env.example
+*.key
+*.keystore
+sui.keystore
+
+# never commit markdown (per project directive) — spec/docs/gap stay local
+*.md
+
+# deps & build
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# sui / move build artifacts
+move/build/
+**/build/
+
+# local data
+*.sqlite
+*.sqlite3
+*.db
+data/
+.walrus/
+
+# logs & os
+*.log
+.DS_Store
+
+# editor/agent local state
+.claude/
+.superpowers/
+
+# demo media (do not commit)
+*.mp4
+*.webm
