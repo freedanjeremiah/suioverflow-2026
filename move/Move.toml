@@ -1,0 +1,12 @@
+[package]
+name = "mycelia"
+edition = "2024.beta"
+license = "Apache-2.0"
+
+[dependencies]
+# Sui framework resolved implicitly from the installed CLI's bundled snapshot
+# (no git clone). If your toolchain needs it explicit, add:
+# Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+
+[addresses]
+mycelia = "0x0"
