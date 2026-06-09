@@ -1,0 +1,18 @@
+{
+  "_comment": "Mycelia MCP server config for any MCP host (Claude Desktop/Code, Cursor, Windsurf). Copy the 'mycelia' entry into your host's mcpServers. Requires: tsx (bundled dev dep) OR build to JS. Set MYCELIA_KEY to a bech32 suiprivkey to reuse a funded wallet, else a local key is generated at ~/.mycelia/keystore.json and must be funded (SUI + WAL on testnet).",
+  "mcpServers": {
+    "mycelia": {
+      "command": "npx",
+      "args": ["-y", "tsx", "/ABS/PATH/sharegraph/apps/mcp/src/index.ts"],
+      "env": {
+        "SUI_NETWORK": "testnet",
+        "SUI_FULLNODE_URL": "https://fullnode.testnet.sui.io",
+        "WALRUS_AGGREGATOR": "https://aggregator.walrus-testnet.walrus.space",
+        "MYCELIA_PACKAGE_ID": "0x0aa76ee7630ca154b27e5365db0368f8901aa5aee79d81855d4961aa01af3452",
+        "SEAL_KEY_SERVER_IDS": "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75,0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+        "SEAL_THRESHOLD": "2",
+        "MYCELIA_KEY": "suiprivkey1... (optional: reuse a funded wallet; else auto-generated + must be funded)"
+      }
+    }
+  }
+}
