@@ -1,0 +1,61 @@
+# Mycelia backend deploy. Served at https://sharegraph.philotheephilix.in via the
+# existing themis-caddy, which ALREADY has a site block reverse-proxying to
+# 172.18.0.1:8787 (the docker bridge gateway = host) — same pattern as the other
+# themis-fronted services. So we don't touch Caddy: we just publish :8787 on that
+# gateway interface and Caddy reaches us.
+#
+# Bound to 172.18.0.1 (not 0.0.0.0) on purpose: reachable by themis-caddy over the
+# bridge, but NOT on the VM's public interface — all public traffic must come
+# through Cloudflare -> Caddy. (Other themis services bind 0.0.0.0; this is stricter.)
+#
+# Cloudflare (operator, dashboard):
+#   - A record sharegraph.philotheephilix.in -> 140.238.231.125, proxied (orange).
+#   - SSL/TLS mode: Full (Caddy serves the Cloudflare Origin CA cert).
+services:
+  sharegraph-backend:
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
+    image: sharegraph-backend:latest
+    container_name: sharegraph-backend
+    # Secrets (MASTER_SUI_PRIVKEY, TATUM_API_KEY, PRIVY_APP_SECRET, ...) come from
+    # the repo .env at runtime — never baked into the image.
+    env_file:
+      - ../../.env
+    environment:
+      PORT: "8787"
+      DB_PATH: /data/mycelia.sqlite
+    ports:
+      - "172.18.0.1:8787:8787"
+    volumes:
+      - sharegraph-data:/data
+    restart: unless-stopped
+
+  # Hosted MCP server (@mycelia/mcp) over Streamable HTTP. Same bridge-bound pattern
+  # as the backend: published on the docker gateway (172.18.0.1) only, reached by
+  # themis-caddy — add a Caddy site block reverse-proxying to 172.18.0.1:8788 and
+  # point the public hostname at it via Cloudflare. Endpoint: POST https://<host>/mcp .
+  # Its own /data volume holds the SQLite graph + generated keystore.
+  mycelia-mcp:
+    build:
+      context: ../..
+      dockerfile: apps/mcp/Dockerfile
+    image: mycelia-mcp:latest
+    container_name: mycelia-mcp
+    # Secrets (MYCELIA_KEY for a stable identity, TATUM_API_KEY, ...) from repo .env.
+    env_file:
+      - ../../.env
+    environment:
+      PORT: "8788"
+      MCP_PATH: /mcp
+      MYCELIA_HOME: /data
+      MYCELIA_DB: /data/memory.sqlite
+    ports:
+      - "172.18.0.1:8788:8788"
+    volumes:
+      - mycelia-mcp-data:/data
+    restart: unless-stopped
+
+volumes:
+  sharegraph-data:
+  mycelia-mcp-data:

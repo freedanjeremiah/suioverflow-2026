@@ -1,0 +1,13 @@
+# Build context = repo root. Keep it lean: no installed deps, vcs, media, or
+# local state. pnpm reinstalls inside the image from the lockfile.
+**/node_modules
+.git
+.github
+*.mp4
+data
+dist
+**/dist
+.superpowers
+test/e2e
+*.log
+.DS_Store
