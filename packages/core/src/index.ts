@@ -12,3 +12,4 @@ export * from './events.js';
 export * from './node-io.js';
 export * from './service.js';
 export * from './funding.js';
+export * from './market.js';
