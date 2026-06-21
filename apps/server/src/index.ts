@@ -7,7 +7,8 @@ import { buildRuntime } from './runtime.js';
 import { Db } from './db.js';
 import { Daemon } from './daemon.js';
 import { makePrivy, bridgeFromToken, bridgeFromUserId } from './auth.js';
-import { fundAddress, isMethodNotFound } from '@mycelia/core';
+import { fundAddress, isMethodNotFound, SessionKey } from '@mycelia/core';
+import OpenAI from 'openai';
 
 // Never let a stray async error (RPC blip, funding shortfall) kill the server/daemon.
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', (e as Error)?.message ?? e));
@@ -75,7 +76,11 @@ app.post('/api/sui-rpc', async (req, reply) => {
       }
       return reply.code(res.status).type(res.headers.get('content-type') ?? 'application/json').send(text);
     }
-    if (attempt >= 5) return reply.code(res.status).type('application/json').send(await res.text());
+    if (attempt >= 5) {
+      // primary still rate-limited / erroring after retries -> public fullnode fallback
+      const fb = await fetch(rpcFullnode, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      return reply.code(fb.status).type(fb.headers.get('content-type') ?? 'application/json').send(await fb.text());
+    }
     await new Promise((r) => setTimeout(r, delay + Math.floor(delay * 0.3)));
     delay = Math.min(delay * 2, 4000);
   }
@@ -97,7 +102,7 @@ app.post<{ Body: { token?: string; privyUserId?: string } }>('/api/login', async
   let funded = { fundedSui: 0n, fundedWal: 0n, digest: '' };
   try {
     funded = await fundAddress(rt.client, rt.master, rt.masterAddress, identity.address, {
-      suiMist: 80_000_000n, walAmount: 40_000_000n, minSui: 30_000_000n, minWal: 8_000_000n,
+      suiMist: 200_000_000n, walAmount: 40_000_000n, minSui: 80_000_000n, minWal: 8_000_000n,
     });
   } catch (e) {
     req.log.warn({ err: (e as Error).message }, 'funding failed (continuing)');
@@ -137,6 +142,61 @@ app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
     return { notifications: db.listNotifications(req.params.id, since) };
   },
 );
+
+// Public "talk to GPT" over a listed graph. The master is added as a session
+// member at list time, so it decrypts the slice (Seal) here and runs GPT. The
+// caller's ability to ask is intentional & public (the value of a listing).
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
+app.post<{ Params: { id: string }; Body: { query?: string } }>('/api/listings/:id/ask', async (req, reply) => {
+  const sessionId = req.params.id;
+  const query = (req.body?.query ?? '').trim();
+  if (!query) return reply.code(400).send({ error: 'empty query' });
+  try {
+    const sk = await SessionKey.create({
+      address: rt.masterAddress, packageId: rt.pub.myceliaPackageId, ttlMin: 10,
+      signer: rt.master, suiClient: rt.client as never,
+    });
+    const state = await rt.sessions.getSessionState(sessionId);
+    const manifest = await rt.mycelia.fetchManifest(state, sk);
+    const decrypted: { title: string; body: string }[] = [];
+    for (const mn of manifest.nodes) {
+      try {
+        const nv = await rt.mycelia.reveal(sessionId, mn.nodeId, mn.latestBlobId, sk);
+        decrypted.push({ title: nv.title, body: nv.body });
+      } catch { /* skip nodes this member can't reveal */ }
+    }
+    if (decrypted.length === 0) return reply.send({ answer: 'This graph has no readable memories yet.', touched: [] });
+
+    // lexical retrieval over the decrypted nodes
+    const terms = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+    const scored = decrypted.map((n) => ({ n, s: terms.reduce((a, t) => a + ((n.title + ' ' + n.body).toLowerCase().includes(t) ? 1 : 0), 0) }));
+    scored.sort((a, b) => b.s - a.s);
+    const top = (scored.some((x) => x.s > 0) ? scored.filter((x) => x.s > 0) : scored).slice(0, 8).map((x) => x.n);
+
+    let answer: string;
+    if (OPENAI_KEY) {
+      const openai = new OpenAI({ apiKey: OPENAI_KEY });
+      const ctx = top.map((n, i) => `[${i + 1}] ${n.title} — ${n.body}`).join('\n');
+      const res = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: "Answer using ONLY these memory notes, in the first person, plainly, in 2-4 sentences. If they don't cover it, say so." },
+          { role: 'user', content: `Question: ${query}\n\nMemory notes:\n${ctx}` },
+        ],
+        temperature: 0.5,
+        max_tokens: 280,
+      });
+      answer = res.choices[0]?.message?.content?.trim() || `Relevant memories: ${top.map((n) => n.title).join(', ')}.`;
+    } else {
+      answer = `Relevant memories: ${top.map((n) => n.title).join(', ')}.`;
+    }
+    return reply.send({ answer, touched: top.map((n) => n.title) });
+  } catch (e) {
+    req.log.warn({ err: (e as Error).message }, 'listing ask failed');
+    return reply.code(500).send({ error: 'could not read this graph: ' + (e as Error).message });
+  }
+});
 
 const port = Number(process.env.PORT ?? 8787);
 await app.listen({ port, host: '0.0.0.0' });

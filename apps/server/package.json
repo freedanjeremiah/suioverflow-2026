@@ -14,7 +14,8 @@
     "@privy-io/server-auth": "^1.32.5",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^16.4.7",
-    "fastify": "^5.2.0"
+    "fastify": "^5.2.0",
+    "openai": "^4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12"
