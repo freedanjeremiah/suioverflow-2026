@@ -17,6 +17,8 @@ import type {
 export const MANIFEST_NODE_ID = '__manifest__';
 /** Reserved seal identity for the event log of a session. */
 export const EVENTLOG_NODE_ID = '__eventlog__';
+/** The reserved name of an account's single private memory session (one per owner). */
+export const PERSONAL_SESSION_NAME = 'personal';
 
 export interface MyceliaConfig {
   storageEpochs: number;
@@ -73,6 +75,116 @@ export class Mycelia {
     const m = await this.publishManifest(sessionId, manifest, signer, owner);
     await this.sessions.setHead(sessionId, m.blobId, 1, signer);
     return { sessionId, capId, manifestBlobId: m.blobId, blobs: [m.ref] };
+  }
+
+  // ---- Personal store: an account's own memory graph, persisted on Walrus ----
+  // The graph lives in ONE per-account session (name = PERSONAL_SESSION_NAME).
+  // Owner is the only member, so the owner alone can decrypt; any client holding
+  // the account's key (web, MCP) discovers + reads/writes the SAME graph. The
+  // unified, no-local-store memory. Sharing still uses SEPARATE sessions so a
+  // shared slice never exposes the whole personal graph.
+
+  /** Find this account's personal memory session, or null if none exists yet. */
+  async findPersonalSession(owner: SuiAddress): Promise<{ sessionId: SuiObjectId; capId: SuiObjectId } | null> {
+    return this.sessions.findOwnedSession(owner, PERSONAL_SESSION_NAME);
+  }
+
+  /** Find (or create) this account's single personal memory session. */
+  async findOrCreatePersonalSession(owner: SuiAddress, signer: Signer, endEpoch: number): Promise<{ sessionId: SuiObjectId; capId: SuiObjectId; created: boolean }> {
+    const found = await this.sessions.findOwnedSession(owner, PERSONAL_SESSION_NAME);
+    if (found) return { sessionId: found.sessionId, capId: found.capId, created: false };
+    const r = await this.createSession(PERSONAL_SESSION_NAME, signer, owner, endEpoch);
+    return { sessionId: r.sessionId, capId: r.capId, created: true };
+  }
+
+  /** Load the full personal graph: decrypt every node in the head manifest
+   *  (the owner is a member, so all are readable). Returns the rebuilt
+   *  Node/Edge graph + the manifest (pass it back as `base` to the next putNode). */
+  async loadFullGraph(state: SessionState, sessionKey: SessionKey): Promise<{ nodes: Node[]; edges: Edge[]; manifest: Manifest }> {
+    const manifest = await this.fetchManifest(state, sessionKey);
+    // reveal one node, retrying with backoff (decrypt/reads can transiently fail
+    // under rate limits) so we don't silently drop nodes from the graph
+    const revealOne = async (mn: { nodeId: NodeId; latestBlobId: BlobId; owner: SuiAddress }): Promise<Node | null> => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const nv = await this.reveal(state.id, mn.nodeId, mn.latestBlobId, sessionKey);
+          return {
+            id: nv.nodeId, owner: nv.owner, type: nv.type, title: nv.title, body: nv.body,
+            importance: nv.importance, tags: nv.tags ?? [], createdAt: nv.ts, updatedAt: nv.ts, version: nv.version,
+          };
+        } catch {
+          if (attempt === 2) return null; // give up after 3 tries — skip this node
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
+      }
+      return null;
+    };
+    // limited concurrency: bursting all reveals at once overwhelms the RPC /
+    // aggregator / key servers and causes rate-limit failures (dropped nodes)
+    const LIMIT = 6;
+    const revealed: (Node | null)[] = [];
+    for (let i = 0; i < manifest.nodes.length; i += LIMIT) {
+      revealed.push(...(await Promise.all(manifest.nodes.slice(i, i + LIMIT).map(revealOne))));
+    }
+    const nodes = revealed.filter((n): n is Node => n !== null);
+    const edges: Edge[] = manifest.edges.map((e) => ({ id: `${e.from}:${e.to}:${e.rel}`, from: e.from, to: e.to, rel: e.rel, owner: e.owner }));
+    return { nodes, edges, manifest };
+  }
+
+  /** Load every graph that has been shared TO `viewer` (sessions they're a member
+   *  of but don't own). Decrypts what they're allowed to read, tags each node with
+   *  its real owner. Powers the web "Shared with me" view. */
+  async loadSharedWithMe(viewer: SuiAddress, sessionKey: SessionKey): Promise<{ nodes: Node[]; edges: Edge[]; sessions: { id: SuiObjectId; owner: SuiAddress; count: number }[] }> {
+    const ids = await this.sessions.findMemberSessions(viewer);
+    const v = viewer.toLowerCase();
+    const nodes: Node[] = [];
+    const edges: Edge[] = [];
+    const sessions: { id: SuiObjectId; owner: SuiAddress; count: number }[] = [];
+    for (const id of ids) {
+      try {
+        const state = await this.sessions.getSessionState(id);
+        if (state.owner.toLowerCase() === v) continue; // your own session — not "shared with me"
+        if (!state.members.map((x) => x.toLowerCase()).includes(v)) continue; // removed since
+        const g = await this.loadFullGraph(state, sessionKey);
+        if (g.nodes.length === 0) continue;
+        nodes.push(...g.nodes);
+        edges.push(...g.edges);
+        sessions.push({ id, owner: state.owner, count: g.nodes.length });
+      } catch {
+        /* unreadable session — skip */
+      }
+    }
+    const seen = new Set<string>();
+    const uniq = nodes.filter((n) => (seen.has(n.id) ? false : (seen.add(n.id), true)));
+    return { nodes: uniq, edges, sessions };
+  }
+
+  /** Upsert one memory node (+ its outgoing edges) into a session — write-through.
+   *  encrypt → Walrus quilt → allowlist (new node) → rebuild manifest → bump head.
+   *  `base` MUST be the latest manifest (head version strictly increases, #2/#5);
+   *  pass the returned manifest as `base` for the next call. */
+  async putNode(args: { sessionId: SuiObjectId; node: Node; outgoing: { to: NodeId; rel: string }[]; base: Manifest; signer: Signer; owner: SuiAddress }): Promise<{ manifest: Manifest; blobs: BlobRef[] }> {
+    const { sessionId, node, outgoing, base, signer, owner } = args;
+    const prev = base.nodes.find((x) => x.nodeId === node.id)?.latestBlobId;
+    const isNew = !prev;
+    const nv: NodeVersion = {
+      nodeId: node.id, owner: node.owner, type: node.type, title: node.title, body: node.body,
+      importance: node.importance, tags: node.tags, version: node.version, ts: Date.now(), edges: outgoing,
+      ...(prev ? { prevBlobId: prev } : {}),
+    };
+    const ct = await this.crypto.encrypt(sessionId, node.id, encodeNodeVersion(nv));
+    // single-entry Quilt so reveal()'s readQuiltPatch path resolves it (same as shareSlice)
+    const quilt = await this.storage.publishQuilt([{ identifier: node.id, contents: ct }], { signer, owner, epochs: this.config.storageEpochs });
+    // allowlist the seal id so the owner can decrypt; share_node is idempotent, only needed once
+    if (isNew) await this.sessions.shareNodes(sessionId, [sealIdBytes(sessionId, node.id)], signer);
+    const edges: Edge[] = outgoing.map((e) => ({ id: `${node.id}:${e.to}:${e.rel}`, from: node.id, to: e.to, rel: e.rel, owner }));
+    const manifest = buildManifest({
+      sessionId, version: base.version + 1, base, updatedAt: Date.now(),
+      blobIds: { [node.id]: quilt.patches[node.id]! }, nodes: [node], edges, roots: [],
+    });
+    const m = await this.publishManifest(sessionId, manifest, signer, owner);
+    await this.sessions.setHead(sessionId, m.blobId, manifest.version, signer);
+    return { manifest, blobs: [{ blobObjectId: quilt.blobObjectId, endEpoch: quilt.endEpoch, kind: 'nodes' }, m.ref] };
   }
 
   private async publishManifest(sessionId: SuiObjectId, manifest: Manifest, signer: Signer, owner: SuiAddress): Promise<{ blobId: BlobId; ref: BlobRef }> {

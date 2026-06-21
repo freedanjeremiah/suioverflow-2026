@@ -54,8 +54,13 @@ export function makeTatumFetch(tatumUrl: string, apiKey: string, fullnodeUrl?: s
   const base = retryingFetch();
   return async (_input: any, init?: any) => {
     const res = await base(tatumUrl, { ...init, headers: { ...(init?.headers ?? {}), 'x-api-key': apiKey } });
-    if (!fullnodeUrl || !res.ok) return res;
+    if (!fullnodeUrl) return res;
+    // Primary errored (rate-limited / 5xx) even after retries -> public fullnode fallback.
+    if (!res.ok) {
+      return base(fullnodeUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: init?.body });
+    }
     const text = await res.text();
+    // Primary answered but the method is unimplemented (-32601) -> public fullnode shim.
     if (isMethodNotFound(text)) {
       return base(fullnodeUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: init?.body });
     }

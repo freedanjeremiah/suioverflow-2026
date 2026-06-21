@@ -144,6 +144,69 @@ export class SessionClient {
       revoked: vecSetAddrs(j.revoked),
     };
   }
+
+  /**
+   * Decentralized discovery: find an owner's session by its exact `name` by
+   * walking the SessionCaps they own (each cap carries its `session` id). Returns
+   * the first match, or null. Lets any client (web, MCP) converge on the same
+   * per-account session with no off-chain registry. MYCELIA_SPEC §7.
+   */
+  async findOwnedSession(owner: string, name: string): Promise<{ sessionId: string; capId: string } | null> {
+    const capType = `${this.packageId}::${MOD}::SessionCap`;
+    const caps: { capId: string; sessionId: string }[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const page = await this.client.getOwnedObjects({
+        owner,
+        filter: { StructType: capType },
+        options: { showContent: true },
+        cursor,
+      });
+      for (const r of page.data) {
+        const d = r.data;
+        const fields = (d?.content as { fields?: { session?: string } } | undefined)?.fields;
+        if (d?.objectId && fields?.session) caps.push({ capId: d.objectId, sessionId: String(fields.session) });
+      }
+      if (!page.hasNextPage || !page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    for (const c of caps) {
+      try {
+        const st = await this.getSessionState(c.sessionId);
+        if (st.name === name && st.owner.toLowerCase() === owner.toLowerCase()) return c;
+      } catch {
+        /* unreadable / deleted cap — skip */
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Sessions where `member` was added (and not since removed) — i.e. graphs
+   * shared TO this address. Walks `MemberChanged` events newest-first, so the
+   * latest membership state per session wins (forward-only revocation honored).
+   */
+  async findMemberSessions(member: string, maxPages = 20): Promise<string[]> {
+    const type = `${this.packageId}::${MOD}::MemberChanged`;
+    const m = member.toLowerCase();
+    const decided = new Set<string>(); // sessions whose latest state we've recorded
+    const added = new Set<string>();
+    let cursor: { txDigest: string; eventSeq: string } | null = null;
+    for (let pages = 0; pages < maxPages; pages++) {
+      const page = await this.client.queryEvents({ query: { MoveEventType: type }, cursor, limit: 50, order: 'descending' });
+      for (const e of page.data) {
+        const j = e.parsedJson as { session?: string; member?: string; added?: boolean } | undefined;
+        if (!j || String(j.member).toLowerCase() !== m) continue;
+        const sid = String(j.session);
+        if (decided.has(sid)) continue; // newest-first: first seen is the current state
+        decided.add(sid);
+        if (j.added) added.add(sid);
+      }
+      if (!page.hasNextPage || !page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    return [...added];
+  }
 }
 
 function bytesToHex(x: any): string {
