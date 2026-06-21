@@ -1,0 +1,196 @@
+@import "tailwindcss";
+
+/*
+  Mycelium — clean, photography-led light system (Airbnb register).
+  Pure white canvas, near-black ink, a single coral "Rausch" accent.
+  Soft rounded corners, ONE shadow tier, no glow, no gradients.
+
+  Token NAMES are kept from the earlier system so components map cleanly:
+    substrate*  -> white / soft grey surfaces
+    ink*        -> text scale (#222 down to muted)
+    glow*       -> the single coral accent
+    hairline*   -> borders
+*/
+
+:root {
+  /* surfaces */
+  --substrate:        #ffffff; /* canvas */
+  --substrate-2:      #f7f7f7; /* surface soft */
+  --substrate-3:      #f2f2f2; /* surface strong */
+  --substrate-glass:  rgba(255, 255, 255, 0.86);
+
+  /* borders */
+  --hairline:         #dddddd;
+  --hairline-soft:    #ebebeb;
+  --hairline-strong:  #c1c1c1;
+
+  /* ink */
+  --ink:        #222222;
+  --ink-mid:    #3f3f3f;
+  --ink-dim:    #6a6a6a;
+  --ink-faint:  #929292;
+
+  /* the single brand accent — Rausch */
+  --glow:          #ff385c;
+  --glow-soft:     #ff385c;
+  --accent-active: #e00b41;
+  --accent-disabled: #ffd1da;
+  --error:         #c13515;
+
+  /* categorical node colors — muted, legible on white, coral leads */
+  --node-coral:  #ff385c;
+  --node-teal:   #0f8a86;
+  --node-amber:  #c47d00;
+  --node-violet: #7b4ddc;
+  --node-green:  #2f9e57;
+  --node-rose:   #c2255c;
+
+  /* type accents (skill/project/person/concept/moment) */
+  --spore-gold:  var(--node-amber);
+  --spore-lime:  var(--node-green);
+  --spore-fox:   var(--node-teal);
+  --spore-coral: var(--node-coral);
+  --spore-rose:  var(--node-rose);
+  --spore-violet:var(--node-violet);
+
+  --radius: 14px;
+
+  /* the one shadow tier */
+  --shadow-1: rgba(0, 0, 0, 0.02) 0 0 0 1px, rgba(0, 0, 0, 0.04) 0 2px 6px 0,
+    rgba(0, 0, 0, 0.1) 0 4px 8px 0;
+
+  --background: var(--substrate);
+  --foreground: var(--ink);
+}
+
+@theme inline {
+  --color-substrate: var(--substrate);
+  --color-substrate-2: var(--substrate-2);
+  --color-substrate-3: var(--substrate-3);
+  --color-hairline: var(--hairline);
+  --color-hairline-soft: var(--hairline-soft);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-ink: var(--ink);
+  --color-ink-mid: var(--ink-mid);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-glow: var(--glow);
+  --color-glow-soft: var(--glow-soft);
+  --color-accent-active: var(--accent-active);
+  --color-error: var(--error);
+  --color-spore-gold: var(--spore-gold);
+  --color-spore-lime: var(--spore-lime);
+  --color-spore-fox: var(--spore-fox);
+  --color-spore-coral: var(--spore-coral);
+  --color-spore-rose: var(--spore-rose);
+  --color-spore-violet: var(--spore-violet);
+
+  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* {
+  border-color: var(--hairline);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--substrate);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--glow) 18%, transparent);
+  color: var(--ink);
+}
+
+/* clean white field, no gradients */
+.substrate-field {
+  background: var(--substrate);
+}
+
+/* frosted-white floating surface (chips, dropdowns over content) */
+.glass {
+  background: var(--substrate-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-1);
+}
+
+.shadow-1 {
+  box-shadow: var(--shadow-1);
+}
+
+/* type defaults — modest weights, tight tracking */
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.font-display { font-family: var(--font-display); }
+/* legacy hook: uppercase micro-labels are Inter, not monospace */
+.mono { font-family: var(--font-sans); font-feature-settings: "tnum" 1; }
+
+.text-balance { text-wrap: balance; }
+.text-pretty { text-wrap: pretty; }
+
+/* a spore — the universal node primitive, now a flat solid dot with a hairline ring */
+.spore-dot {
+  position: relative;
+  border-radius: 9999px;
+  background: var(--c, var(--glow));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--c, var(--glow)) 70%, #000 8%);
+}
+
+/* legacy hook — no text glow in the light system */
+.glow-text { color: var(--glow); }
+
+@keyframes drift {
+  0%, 100% { transform: translate3d(0,0,0); }
+  50% { transform: translate3d(0,-6px,0); }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+@keyframes spore-in {
+  from { opacity: 0; transform: scale(0.7); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-drift { animation: drift 7s var(--ease-out-quint) infinite; }
+.animate-pulse-glow { animation: pulse-soft 3.5s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* thin neutral scrollbar */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 9999px;
+  border: 3px solid #fff;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--hairline-strong); }

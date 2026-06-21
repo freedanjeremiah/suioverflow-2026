@@ -1,12 +1,12 @@
+"use client";
+
 // Build the in-browser Mycelia service from the bridged seed + public config.
-// Encryption + publishing happen ON THE DEVICE (invariant #1); the user's
-// bridged keypair signs + pays + owns (invariants #5/#6).
-import {
-  makeSuiClient, keypairFromSecret, Crypto, Storage, SessionClient, Mycelia,
-} from '@mycelia/core';
-import type { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import walrusWasmUrl from '@mysten/walrus-wasm/web/walrus_wasm_bg.wasm?url';
-import { rpcProxyUrl, type PublicConfig } from './api.js';
+// Ported from the old Vite app. Encryption + publishing happen ON THE DEVICE;
+// the user's bridged keypair signs + pays + owns. Loaded via dynamic import from
+// the store (client-only) so the heavy Sui/Walrus/Seal SDKs never hit SSR.
+import { makeSuiClient, keypairFromSecret, Crypto, Storage, SessionClient, Mycelia, MarketClient, SessionKey } from "@mycelia/core";
+import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { rpcProxyUrl, type PublicConfig } from "./api";
 
 export interface BrowserMycelia {
   address: string;
@@ -16,6 +16,7 @@ export interface BrowserMycelia {
   storage: Storage;
   sessions: SessionClient;
   service: Mycelia;
+  market: MarketClient;
   config: PublicConfig;
 }
 
@@ -27,12 +28,42 @@ function seedToBytes(hex: string): Uint8Array {
 
 export function buildBrowserMycelia(seedHex: string, address: string, config: PublicConfig): BrowserMycelia {
   const keypair = keypairFromSecret(seedToBytes(seedHex));
-  // Route browser Sui RPC through the backend Tatum proxy (key stays server-side).
+  // Browser Sui RPC goes through the backend Tatum proxy (key stays server-side).
   const client = makeSuiClient({ network: config.network, proxyUrl: rpcProxyUrl() });
-  const net = config.network === 'mainnet' ? 'mainnet' : 'testnet';
-  const crypto = new Crypto({ suiClient: client, keyServerIds: config.keyServerIds, threshold: config.sealThreshold, packageId: config.packageId });
-  const storage = new Storage({ network: net, suiClient: client, aggregatorUrl: config.walrusAggregator, wasmUrl: walrusWasmUrl });
+  const net = config.network === "mainnet" ? "mainnet" : "testnet";
+  const crypto = new Crypto({
+    suiClient: client,
+    keyServerIds: config.keyServerIds,
+    threshold: config.sealThreshold,
+    packageId: config.packageId,
+  });
+  const storage = new Storage({
+    network: net,
+    suiClient: client,
+    aggregatorUrl: config.walrusAggregator,
+    // served from apps/web/public (Turbopack-safe, no bundler wasm-url magic)
+    wasmUrl: "/walrus_wasm_bg.wasm",
+  });
   const sessions = new SessionClient(client, config.packageId);
   const service = new Mycelia(sessions, crypto, storage, { storageEpochs: config.storageEpochs });
-  return { address, keypair, client, crypto, storage, sessions, service, config };
+  const market = new MarketClient(client, config.packageId);
+  return { address, keypair, client, crypto, storage, sessions, service, market, config };
+}
+
+/** A Seal SessionKey for reading (decrypting) this account's own sessions. The
+ *  bridged keypair signs locally — no wallet prompt. Reused across reads. */
+export function createSessionKey(m: BrowserMycelia): Promise<SessionKey> {
+  return SessionKey.create({
+    address: m.address,
+    packageId: m.config.packageId,
+    ttlMin: 30,
+    signer: m.keypair,
+    suiClient: m.client as never,
+  });
+}
+
+/** The account's private key in `suiprivkey…` (bech32) form — what an MCP client
+ *  pastes as MYCELIA_KEY to act as this same Sui account (shared memory). */
+export function exportAgentKey(m: BrowserMycelia): string {
+  return m.keypair.getSecretKey();
 }
