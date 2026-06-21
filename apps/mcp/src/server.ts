@@ -2,8 +2,9 @@
 // @mycelia/core (encrypt-on-device, owner=this key). MYCELIA_SPEC §3, flows A-H.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { SessionKey, sealIdBytes, isNoAccess, buildGraphView, NODE_TYPES } from '@mycelia/core';
-import type { Manifest, EventLogEntry, NodeType } from '@mycelia/core';
+import { randomUUID } from 'node:crypto';
+import { SessionKey, sealIdBytes, isNoAccess, buildGraphView, neighborhood, NODE_TYPES } from '@mycelia/core';
+import type { Manifest, EventLogEntry, NodeType, Node, Edge } from '@mycelia/core';
 import type { Runtime } from './runtime.js';
 
 const TYPE = z.enum(NODE_TYPES as unknown as [string, ...string[]]);
@@ -32,22 +33,98 @@ export function buildMcpServer(rt: Runtime): McpServer {
     return { manifest, events, sk };
   }
 
-  // ---- Flow A: capture ----
+  // ---- the account's personal memory graph: ONE per-account session on Walrus ----
+  // This is the unified store. Any client holding this key (web, this MCP) finds the
+  // same session and reads/writes the same graph. No local source of truth.
+  let personal: { sessionId: string; capId: string } | null = null;
+  // cache the decrypted graph, keyed by the on-chain head version (a web write bumps
+  // it, so we reload). Invalidated to null after our own writes.
+  let cache: { version: number; nodes: Node[]; edges: Edge[]; manifest: Manifest } | null = null;
+
+  async function ensurePersonal(): Promise<{ sessionId: string; capId: string }> {
+    if (personal) return personal;
+    const endEpoch = (await rt.storage.currentEpoch().catch(() => 0)) + rt.pub.storageEpochs;
+    const ps = await rt.service.findOrCreatePersonalSession(rt.address, rt.keypair, endEpoch);
+    personal = { sessionId: ps.sessionId, capId: ps.capId };
+    return personal;
+  }
+
+  async function loadPersonal(): Promise<{ nodes: Node[]; edges: Edge[]; manifest: Manifest }> {
+    const ps = await ensurePersonal();
+    const sk = await sessionKey();
+    const state = await rt.service.state(ps.sessionId);
+    if (cache && cache.version === state.headVersion) return { nodes: cache.nodes, edges: cache.edges, manifest: cache.manifest };
+    const loaded = await rt.service.loadFullGraph(state, sk);
+    cache = { version: state.headVersion, ...loaded };
+    return loaded;
+  }
+
+  const dedupeOut = (es: { to: string; rel: string }[]) => {
+    const seen = new Set<string>();
+    return es.filter((e) => { const k = `${e.to}:${e.rel}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+
+  /** Lexical prefilter + d-hop neighborhood over the graph (agent ranks the result). */
+  function recallFrom(nodes: Node[], edges: Edge[], query: string, depth: number): { nodes: (Node & { score: number })[]; edges: Edge[] } {
+    const terms = query.toLowerCase().split(/\W+/).filter(Boolean);
+    const score = (n: Node) => {
+      const hay = `${n.title} ${n.body} ${n.tags.join(' ')}`.toLowerCase();
+      let s = 0;
+      for (const t of terms) if (hay.includes(t)) s += hay.split(t).length - 1;
+      return s + (n.title.toLowerCase().includes(query.toLowerCase()) ? 3 : 0);
+    };
+    const ranked = nodes.map((n) => ({ n, s: score(n) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+    const roots = (ranked.length ? ranked : nodes.map((n) => ({ n, s: 0 }))).slice(0, 6);
+    const keep = new Set<string>();
+    for (const r of roots) for (const id of neighborhood(r.n.id, edges, depth)) keep.add(id);
+    const scoreMap = new Map(ranked.map((x) => [x.n.id, x.s]));
+    const out = nodes.filter((n) => keep.has(n.id)).map((n) => ({ ...n, score: scoreMap.get(n.id) ?? 0 }));
+    return { nodes: out, edges: edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
+  }
+
+  // ---- Flow A: capture (write-through to your personal Walrus session) ----
   mcp.registerTool('mycelia_remember', {
-    description: 'Store a durable memory (node) in your private local graph, optionally linked to existing memories. Returns the node.',
+    description: 'Store a durable memory (node) in your account graph on Walrus (encrypted to you), optionally linked to existing memories. Shows up in the Mycelia web app under the same account. Returns the node.',
     inputSchema: {
       title: z.string(), body: z.string(), type: TYPE.default('concept'),
       importance: z.number().min(0).max(1).optional(),
       tags: z.array(z.string()).optional(),
       links: z.array(z.object({ to: z.string().describe('title or id of an existing memory'), rel: z.string() })).optional(),
     },
-  }, async (a) => ok(rt.store.remember({ title: a.title, body: a.body, type: a.type as NodeType, importance: a.importance, tags: a.tags, links: a.links })));
+  }, async (a) => {
+    try {
+      const ps = await ensurePersonal();
+      const { nodes, edges, manifest } = await loadPersonal();
+      // upsert by title (same dedupe behavior as before)
+      const existing = nodes.find((n) => n.title === a.title);
+      const node: Node = existing
+        ? { ...existing, body: a.body, type: a.type as NodeType, importance: a.importance ?? existing.importance, tags: a.tags ?? existing.tags, updatedAt: Date.now(), version: existing.version + 1 }
+        : { id: randomUUID(), owner: rt.address, type: a.type as NodeType, title: a.title, body: a.body, importance: a.importance ?? 0.5, tags: a.tags ?? [], createdAt: Date.now(), updatedAt: Date.now(), version: 1 };
+      // resolve links (title or id) and preserve the node's existing outgoing edges
+      const linked: { to: string; rel: string }[] = [];
+      for (const l of a.links ?? []) {
+        const to = nodes.find((n) => n.id === l.to || n.title === l.to);
+        if (to) linked.push({ to: to.id, rel: l.rel });
+      }
+      const priorOut = edges.filter((e) => e.from === node.id).map((e) => ({ to: e.to, rel: e.rel }));
+      const outgoing = dedupeOut([...priorOut, ...linked]);
+      const res = await rt.service.putNode({ sessionId: ps.sessionId, node, outgoing, base: manifest, signer: rt.keypair, owner: rt.address });
+      cache = null; // force a fresh decrypt on next read
+      rt.store.recordBlobs(ps.sessionId, res.blobs); // track Walrus blobs for renewal
+      return ok({ id: node.id, owner: node.owner, type: node.type, title: node.title, version: node.version, links: outgoing.length, manifestVersion: res.manifest.version });
+    } catch (e) { return fail('remember failed: ' + (e as Error).message); }
+  });
 
   // ---- recall (structured subgraph; agent ranks) ----
   mcp.registerTool('mycelia_recall', {
-    description: 'Recall relevant private memories: lexical match + d-hop neighborhood. Returns a subgraph {nodes(+score), edges} for you to rank.',
+    description: 'Recall relevant memories from your account graph on Walrus: lexical match + d-hop neighborhood. Returns a subgraph {nodes(+score), edges} for you to rank.',
     inputSchema: { query: z.string(), depth: z.number().int().min(0).max(3).default(1) },
-  }, async (a) => ok(rt.store.recall(a.query, a.depth)));
+  }, async (a) => {
+    try {
+      const { nodes, edges } = await loadPersonal();
+      return ok(recallFrom(nodes, edges, a.query, a.depth));
+    } catch (e) { return fail('recall failed: ' + (e as Error).message); }
+  });
 
   // ---- Flow B: create session ----
   mcp.registerTool('mycelia_create_session', {
@@ -70,13 +147,14 @@ export function buildMcpServer(rt: Runtime): McpServer {
     inputSchema: { session: z.string(), root: z.string().describe('title or id of a local memory'), depth: z.number().int().min(0).max(3).default(1) },
   }, async (a) => {
     try {
-      const root = rt.store.nodeByTitleOrId(a.root);
+      const graph = await loadPersonal();
+      const root = graph.nodes.find((n) => n.id === a.root || n.title === a.root);
       if (!root) return fail(`unknown memory: ${a.root}`);
       const cur = await loadGraph(a.session);
       const superseded = rt.store.blobIdsByKind(a.session, ['manifest', 'events']); // old head/event blobs -> GC after
       const res = await rt.service.shareSlice({
         sessionId: a.session, rootId: root.id, depth: a.depth,
-        nodes: rt.store.allNodes(), edges: rt.store.allEdges(),
+        nodes: graph.nodes, edges: graph.edges,
         signer: rt.keypair, owner: rt.address,
         base: cur?.manifest, events: cur?.events,
       });
@@ -184,11 +262,12 @@ export function buildMcpServer(rt: Runtime): McpServer {
     inputSchema: { session: z.string(), node: z.string().describe('title or id of a local memory') },
   }, async (a) => {
     try {
-      const node = rt.store.nodeByTitleOrId(a.node);
+      const graph = await loadPersonal();
+      const node = graph.nodes.find((n) => n.id === a.node || n.title === a.node);
       if (!node) return fail(`unknown memory: ${a.node}`);
       const cur = await loadGraph(a.session);
       if (!cur) return fail('no manifest');
-      const outgoing = rt.store.allEdges().filter((e) => e.from === node.id).map((e) => ({ to: e.to, rel: e.rel }));
+      const outgoing = graph.edges.filter((e) => e.from === node.id).map((e) => ({ to: e.to, rel: e.rel }));
       const res = await rt.service.expandNode({ sessionId: a.session, node, outgoing, base: cur.manifest, events: cur.events, signer: rt.keypair, owner: rt.address });
       rt.store.recordBlobs(a.session, res.blobs);
       return ok({ expanded: node.title, manifestVersion: res.manifest.version });
