@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 5173",
-    "build": "next build",
+    "build": "pnpm --filter @mycelia/core build && next build",
     "start": "next start -p 5173",
     "lint": "eslint",
     "test:e2e": "playwright test",
